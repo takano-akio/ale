@@ -262,3 +262,17 @@ function! ale#lsp#OpenTSServerDocumentIfNeeded(conn_id, buffer) abort
 
     return l:opened
 endfunction
+
+function! ale#lsp#OpenDocumentIfNeeded(conn_id, buffer, language_id) abort
+    let l:conn = s:FindConnection('id', a:conn_id)
+    let l:opened = 0
+
+    if !empty(l:conn) && index(l:conn.open_documents, a:buffer) < 0
+        let l:message = ale#lsp#message#DidOpen(a:buffer, a:language_id)
+        call ale#lsp#Send(a:conn_id, l:message)
+        call add(l:conn.open_documents, a:buffer)
+        let l:opened = 1
+    endif
+
+    return l:opened
+endfunction

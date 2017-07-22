@@ -31,13 +31,15 @@ endfunction
 
 function! ale#engine#InitBufferInfo(buffer) abort
     if !has_key(g:ale_buffer_info, a:buffer)
-        " job_list will hold the list of jobs
+        " job_list will hold the list of job IDs
+        " active_linter_list will hold the list of active linter names
         " loclist holds the loclist items after all jobs have completed.
         " temporary_file_list holds temporary files to be cleaned up
         " temporary_directory_list holds temporary directories to be cleaned up
         " history holds a list of previously run commands for this buffer
         let g:ale_buffer_info[a:buffer] = {
         \   'job_list': [],
+        \   'active_linter_list': [],
         \   'loclist': [],
         \   'temporary_file_list': [],
         \   'temporary_directory_list': [],
@@ -114,6 +116,12 @@ function! s:GatherOutput(job_id, line) abort
 endfunction
 
 function! s:HandleLoclist(linter_name, buffer, loclist) abort
+    let l:buffer_info = g:ale_buffer_info[a:buffer]
+
+    " Remove this linter from the list of active linters.
+    " This may have already been done when the job exits.
+    call filter(l:buffer_info.active_linter_list, 'v:val !=# a:linter_name')
+
     " Make some adjustments to the loclists to fix common problems, and also
     " to set default values for loclist items.
     let l:linter_loclist = ale#engine#FixLocList(a:buffer, a:linter_name, a:loclist)
@@ -154,6 +162,7 @@ function! s:HandleExit(job_id, exit_code) abort
     call ale#job#Stop(a:job_id)
     call remove(s:job_info_map, a:job_id)
     call filter(g:ale_buffer_info[l:buffer].job_list, 'v:val !=# a:job_id')
+    call filter(g:ale_buffer_info[l:buffer].active_linter_list, 'v:val !=# l:linter.name')
 
     " Stop here if we land in the handle for a job completing if we're in
     " a sandbox.
@@ -180,7 +189,29 @@ function! s:HandleExit(job_id, exit_code) abort
     call s:HandleLoclist(l:linter.name, l:buffer, l:loclist)
 endfunction
 
+function! s:HandleLSPDiagnostics(response) abort
+    let l:loclist = ale#lsp#response#ReadDiagnostics(a:response)
+    let l:filename = ale#path#FromURI(a:response.params.uri)
+    let l:buffer = bufnr(l:filename)
+
+    let l:info = get(g:ale_buffer_info, l:buffer, {})
+
+    if empty(l:info)
+        return
+    endif
+
+    call s:HandleLoclist('langserver', l:buffer, l:loclist)
+endfunction
+
 function! s:HandleLSPResponse(response) abort
+    let l:method = get(a:response, 'method', '')
+
+    if l:method ==# 'textDocument/publishDiagnostics'
+        call s:HandleLSPDiagnostics(a:response)
+    endif
+endfunction
+
+function! s:HandleTSServerResponse(response) abort
     let l:is_diag_response = get(a:response, 'type', '') ==# 'event'
     \   && get(a:response, 'event', '') ==# 'semanticDiag'
 
@@ -195,8 +226,6 @@ function! s:HandleLSPResponse(response) abort
     if empty(l:info)
         return
     endif
-
-    let l:info.waiting_for_tsserver = 0
 
     let l:loclist = ale#lsp#response#ReadTSServerDiagnostics(a:response)
 
@@ -430,6 +459,7 @@ function! s:RunJob(options) abort
     if l:job_id
         " Add the job to the list of jobs, so we can track them.
         call add(g:ale_buffer_info[l:buffer].job_list, l:job_id)
+        call add(g:ale_buffer_info[l:buffer].active_linter_list, l:linter.name)
 
         let l:status = 'started'
         " Store the ID for the job in the map to read back again.
@@ -555,6 +585,66 @@ function! s:StopCurrentJobs(buffer, include_lint_file_jobs) abort
     let l:info.job_list = l:new_job_list
 endfunction
 
+function! s:CheckWithLSP(buffer, linter) abort
+    let l:command = ''
+    let l:address = ''
+
+    if a:linter.lsp ==# 'stdio'
+        let l:executable = ale#linter#GetExecutable(a:buffer, a:linter)
+
+        if !s:IsExecutable(l:executable)
+            return
+        endif
+
+        let l:command = ale#job#PrepareCommand(
+        \ ale#linter#GetCommand(a:buffer, a:linter),
+        \)
+        let l:id = ale#lsp#StartProgram(
+        \   l:executable,
+        \   l:command,
+        \   function('s:HandleLSPResponse'),
+        \)
+    else
+        let l:address = ale#linter#GetAddress(a:buffer, a:linter)
+        let l:id = ale#lsp#ConnectToAddress(
+        \   l:address,
+        \   function('s:HandleLSPResponse'),
+        \)
+    endif
+
+    if !l:id
+        if g:ale_history_enabled && !empty(l:command)
+            call ale#history#Add(a:buffer, 'failed', l:id, l:command)
+        endif
+
+        return
+    endif
+
+    " Init the project root if needed.
+    let l:root = ale#util#GetFunction(a:linter.project_root_callback)(a:buffer)
+    call ale#lsp#Send(l:id, ale#lsp#message#Initialize(l:root))
+
+    let l:language_id = ale#util#GetFunction(a:linter.language_callback)(a:buffer)
+    let l:request_sent = 0
+
+    if ale#lsp#OpenDocumentIfNeeded(l:id, a:buffer, l:language_id)
+        let l:request_sent = 1
+
+        if g:ale_history_enabled && !empty(l:command)
+            call ale#history#Add(a:buffer, 'started', l:id, l:command)
+        endif
+    else
+        let l:request_id = ale#lsp#Send(l:id, ale#lsp#message#DidChange(a:buffer))
+        let l:request_sent = l:request_id != 0
+    endif
+
+    let l:info = g:ale_buffer_info[a:buffer]
+
+    if l:request_sent
+        call add(l:info.active_linter_list, a:linter.name)
+    endif
+endfunction
+
 function! s:CheckWithTSServer(buffer, linter, executable) abort
     let l:info = g:ale_buffer_info[a:buffer]
 
@@ -564,7 +654,7 @@ function! s:CheckWithTSServer(buffer, linter, executable) abort
     let l:id = ale#lsp#StartProgram(
     \   a:executable,
     \   l:command,
-    \   function('s:HandleLSPResponse'),
+    \   function('s:HandleTSServerResponse'),
     \)
 
     if !l:id
@@ -589,7 +679,7 @@ function! s:CheckWithTSServer(buffer, linter, executable) abort
     \)
 
     if l:request_id != 0
-        let l:info.waiting_for_tsserver = 1
+        call add(l:info.active_linter_list, a:linter.name)
     endif
 
     return l:request_id != 0
@@ -625,6 +715,8 @@ function! s:RunLinter(buffer, linter) abort
 
             return s:InvokeChain(a:buffer, a:linter, 0, [])
         endif
+    else
+        call s:CheckWithLSP(a:buffer, a:linter)
     endif
 
     return 0

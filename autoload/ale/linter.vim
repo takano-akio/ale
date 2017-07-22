@@ -62,6 +62,7 @@ function! ale#linter#PreProcess(linter) abort
     let l:needs_address = l:obj.lsp ==# 'socket'
     let l:needs_executable = l:obj.lsp !=# 'socket'
     let l:needs_command = l:obj.lsp !=# 'socket'
+    let l:needs_lsp_details = l:obj.lsp ==# 'socket' || l:obj.lsp ==# 'stdio'
 
     if empty(l:obj.lsp)
         let l:obj.callback = get(a:linter, 'callback')
@@ -174,6 +175,20 @@ function! ale#linter#PreProcess(linter) abort
         endif
     else
         throw '`address_callback` must be defined for getting the LSP address'
+    endif
+
+    if l:needs_lsp_details
+        let l:obj.language_callback = get(a:linter, 'language_callback')
+
+        if !s:IsCallback(l:obj.language_callback)
+            throw '`language_callback` must be a callback for LSP linters'
+        endif
+
+        let l:obj.project_root_callback = get(a:linter, 'project_root_callback')
+
+        if !s:IsCallback(l:obj.project_root_callback)
+            throw '`project_root_callback` must be a callback for LSP linters'
+        endif
     endif
 
     let l:obj.output_stream = get(a:linter, 'output_stream', 'stdout')
@@ -345,4 +360,11 @@ function! ale#linter#GetCommand(buffer, linter) abort
     return has_key(a:linter, 'command_callback')
     \   ? ale#util#GetFunction(a:linter.command_callback)(a:buffer)
     \   : a:linter.command
+endfunction
+
+" Given a buffer and linter, get the address for connecting to the server.
+function! ale#linter#GetAddress(buffer, linter) abort
+    return has_key(a:linter, 'address_callback')
+    \   ? ale#util#GetFunction(a:linter.address_callback)(a:buffer)
+    \   : a:linter.address
 endfunction

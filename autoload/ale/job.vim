@@ -199,6 +199,8 @@ function! ale#job#Start(command, options) abort
     let l:job_info = copy(a:options)
     let l:job_options = {}
 
+    " call ch_logfile(expand('~/channel.log'), 'a')
+
     if has('nvim')
         if has_key(a:options, 'out_cb')
             let l:job_options.on_stdout = function('s:NeoVimCallback')
