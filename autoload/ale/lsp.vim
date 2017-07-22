@@ -14,6 +14,7 @@ function! s:NewConnection() abort
     let l:conn = {
     \   'id': '',
     \   'data': '',
+    \   'initialized': 0,
     \   'open_documents': [],
     \}
 
@@ -149,7 +150,16 @@ function! ale#lsp#HandleMessage(conn, message) abort
 
     " Call our callbacks.
     for l:response in l:response_list
-        if has_key(a:conn, 'callback')
+        if get(l:response, 'method', '') ==# 'initialize'
+            " After the server starts, send messages we had queued previously.
+            for l:message_data in get(a:conn, 'after_init_message_list', [])
+                call s:SendMessageData(a:conn, l:message_data)
+            endfor
+
+            if has_key(a:conn, 'after_init_message_list')
+                call remove(a:conn, 'after_init_message_list')
+            endif
+        elseif has_key(a:conn, 'callback')
             call ale#util#GetFunction(a:conn.callback)(l:response)
         endif
     endfor
@@ -173,7 +183,7 @@ endfunction
 "
 " The job ID will be returned for for the program if it ran, otherwise
 " 0 will be returned.
-function! ale#lsp#StartProgram(executable, command, callback) abort
+function! ale#lsp#StartProgram(executable, command, project_root, callback) abort
     if !executable(a:executable)
         return 0
     endif
@@ -199,13 +209,19 @@ function! ale#lsp#StartProgram(executable, command, callback) abort
     endif
 
     let l:conn.id = l:job_id
+    let l:conn.project_root = a:project_root
     let l:conn.callback = a:callback
+
+    " tsserver connections are ready right away.
+    if a:executable =~# 'tsserver$'
+        let l:conn.initialized = 1
+    endif
 
     return l:job_id
 endfunction
 
 " Connect to an address and set up a callback for handling responses.
-function! ale#lsp#ConnectToAddress(address, callback) abort
+function! ale#lsp#ConnectToAddress(address, project_root, callback) abort
     let l:conn = s:FindConnection('id', a:address)
     " Get the current connection or a new one.
     let l:conn = !empty(l:conn) ? l:conn : s:NewConnection()
@@ -223,7 +239,21 @@ function! ale#lsp#ConnectToAddress(address, callback) abort
     endif
 
     let l:conn.id = a:address
+    let l:conn.project_root = a:project_root
     let l:conn.callback = a:callback
+
+    return 1
+endfunction
+
+function! s:SendMessageData(conn, data) abort
+    if has_key(a:conn, 'executable')
+        call ale#job#SendRaw(a:conn.id, a:data)
+    elseif has_key(a:conn, 'channel') && ch_status(a:conn.channnel) ==# 'open'
+        " Send the message to the server
+        call ch_sendraw(a:conn.channel, a:data)
+    else
+        return 0
+    endif
 
     return 1
 endfunction
@@ -236,15 +266,35 @@ endfunction
 "          >= 1 with the message ID when a response is expected.
 function! ale#lsp#Send(conn_id, message) abort
     let l:conn = s:FindConnection('id', a:conn_id)
+
+    let l:conn_ready = has_key(l:conn, 'initialized') && l:conn.initialized
+
+    " If we haven't initialized the server yet, then send the message for it.
+    if !l:conn_ready
+        " Only send the init message once.
+        if !get(l:conn, 'init_message_sent')
+            let l:conn.init_message_sent = 1
+
+            let [l:init_id, l:init_data] = ale#lsp#CreateMessageData(
+            \   ale#lsp#message#Initialize(l:conn.project_root),
+            \)
+
+            call s:SendMessageData(l:conn, l:init_data)
+        endif
+    endif
+
     let [l:id, l:data] = ale#lsp#CreateMessageData(a:message)
 
-    if has_key(l:conn, 'executable')
-        call ale#job#SendRaw(l:conn.id, l:data)
-    elseif has_key(l:conn, 'channel') && ch_status(l:conn.channnel) ==# 'open'
-        " Send the message to the server
-        call ch_sendraw(l:conn.channel, l:data)
+    if l:conn_ready
+        " Send the message now.
+        call s:SendMessageData(l:conn, l:data)
     else
-        return 0
+        " Add the message we wanted to send to a list to send later.
+        if !has_key(l:conn, 'after_init_message_list')
+            let l:conn.after_init_message_list = []
+        endif
+
+        call add(l:conn.after_init_message_list, l:data)
     endif
 
     return l:id == 0 ? -1 : l:id

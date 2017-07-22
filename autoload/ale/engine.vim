@@ -588,6 +588,7 @@ endfunction
 function! s:CheckWithLSP(buffer, linter) abort
     let l:command = ''
     let l:address = ''
+    let l:root = ale#util#GetFunction(a:linter.project_root_callback)(a:buffer)
 
     if a:linter.lsp ==# 'stdio'
         let l:executable = ale#linter#GetExecutable(a:buffer, a:linter)
@@ -602,12 +603,14 @@ function! s:CheckWithLSP(buffer, linter) abort
         let l:id = ale#lsp#StartProgram(
         \   l:executable,
         \   l:command,
+        \   l:root,
         \   function('s:HandleLSPResponse'),
         \)
     else
         let l:address = ale#linter#GetAddress(a:buffer, a:linter)
         let l:id = ale#lsp#ConnectToAddress(
         \   l:address,
+        \   l:root,
         \   function('s:HandleLSPResponse'),
         \)
     endif
@@ -621,7 +624,6 @@ function! s:CheckWithLSP(buffer, linter) abort
     endif
 
     " Init the project root if needed.
-    let l:root = ale#util#GetFunction(a:linter.project_root_callback)(a:buffer)
     call ale#lsp#Send(l:id, ale#lsp#message#Initialize(l:root))
 
     let l:language_id = ale#util#GetFunction(a:linter.language_callback)(a:buffer)
@@ -654,6 +656,7 @@ function! s:CheckWithTSServer(buffer, linter, executable) abort
     let l:id = ale#lsp#StartProgram(
     \   a:executable,
     \   l:command,
+    \   '',
     \   function('s:HandleTSServerResponse'),
     \)
 
