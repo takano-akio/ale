@@ -5,6 +5,11 @@ call ale#linter#Define('haskell', {
 \   'name': 'ghc',
 \   'output_stream': 'stderr',
 \   'executable': 'ghc',
-\   'command': 'ghc -fno-code -v0 %t',
+\   'command_callback': 'ale_linters#haskell#ghc#GetCommand',
 \   'callback': 'ale#handlers#haskell#HandleGHCFormat',
 \})
+
+function! ale_linters#haskell#ghc#GetCommand(buffer) abort
+    return ale#path#BufferCdString(a:buffer)
+    \   . ' ghc -fno-code -v0 %t'
+endfunction
